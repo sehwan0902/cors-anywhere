@@ -1,49 +1,62 @@
-// Listen on a specific host via the HOST environment variable
-var host = process.env.HOST || '0.0.0.0';
-// Listen on a specific port via the PORT environment variable
-var port = process.env.PORT || 8080;
+const http = require("node:http");
 
-// Grab the blacklist from the command-line so that we can update the blacklist without deploying
-// again. CORS Anywhere is open by design, and this blacklist is not used, except for countering
-// immediate abuse (e.g. denial of service). If you want to block all origins except for some,
-// use originWhitelist instead.
-var originBlacklist = parseEnvList(process.env.CORSANYWHERE_BLACKLIST);
-var originWhitelist = parseEnvList(process.env.CORSANYWHERE_WHITELIST);
-function parseEnvList(env) {
-  if (!env) {
-    return [];
+const allowedOrigins = [
+  "http://127.0.0.1:5500",
+  "http://localhost:5500",
+  process.env.NETLIFY_ORIGIN
+];
+
+const server = http.createServer(async (request, response) => {
+  const url = new URL(request.url, "http://localhost");
+  const origin = request.headers.origin;
+
+  response.setHeader("Content-Type", "application/json; charset=utf-8");
+  response.setHeader("Vary", "Origin");
+
+  function sendJson(status, data) {
+    response.statusCode = status;
+    response.end(JSON.stringify(data));
   }
-  return env.split(',');
-}
 
-// Set up rate-limiting to avoid abuse of the public CORS Anywhere server.
-var checkRateLimit = require('./lib/rate-limit')(process.env.CORSANYWHERE_RATELIMIT);
+  if (origin) {
+    if (!allowedOrigins.includes(origin)) {
+      return sendJson(403, { error: "허용되지 않은 사이트입니다." });
+    }
+    response.setHeader("Access-Control-Allow-Origin", origin);
+  }
 
-var cors_proxy = require('./lib/cors-anywhere');
-cors_proxy.createServer({
-  originBlacklist: originBlacklist,
-  originWhitelist: originWhitelist,
-  requireHeader: ['origin', 'x-requested-with'],
-  checkRateLimit: checkRateLimit,
-  removeHeaders: [
-    'cookie',
-    'cookie2',
-    // Strip Heroku-specific headers
-    'x-request-start',
-    'x-request-id',
-    'via',
-    'connect-time',
-    'total-route-time',
-    // Other Heroku added debug headers
-    // 'x-forwarded-for',
-    // 'x-forwarded-proto',
-    // 'x-forwarded-port',
-  ],
-  redirectSameOrigin: true,
-  httpProxyOptions: {
-    // Do not add X-Forwarded-For, etc. headers, because Heroku already adds it.
-    xfwd: false,
-  },
-}).listen(port, host, function() {
-  console.log('Running CORS Anywhere on ' + host + ':' + port);
+  if (request.method !== "GET" || url.pathname !== "/subway") {
+    return sendJson(404, { error: "/subway 경로를 사용해 주세요." });
+  }
+
+  const date = url.searchParams.get("date");
+  if (!date || !/^\d{8}$/.test(date)) {
+    return sendJson(400, { error: "날짜를 YYYYMMDD 형식으로 입력해 주세요." });
+  }
+
+  const apiKey = process.env.SEOUL_API_KEY;
+  if (!apiKey) {
+    return sendJson(500, { error: "서울시 API 인증키가 설정되지 않았습니다." });
+  }
+
+  const apiUrl =
+    `http://openapi.seoul.go.kr:8088/${encodeURIComponent(apiKey)}` +
+    `/json/CardSubwayStatsNew/1/1000/${date}`;
+
+  try {
+    const result = await fetch(apiUrl, {
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!result.ok) {
+      return sendJson(502, { error: "서울시 API 요청에 실패했습니다." });
+    }
+
+    const data = await result.json();
+    sendJson(200, data);
+  } catch {
+    sendJson(502, { error: "서울시 API 응답을 읽지 못했습니다." });
+  }
 });
+
+server.listen(process.env.PORT || 10000, "0.0.0.0");
